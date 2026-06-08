@@ -8,6 +8,9 @@ on:
       - 'buildscripts/**'
       - '.github/workflows/build-libdovi.yml'
 
+permissions:
+  contents: write
+
 env:
   IN_CI: 1
 
