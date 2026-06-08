@@ -1,0 +1,12 @@
+name: ping
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [libdovi]
+    paths: ['.github/workflows/ping.yml']
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "hello from $(uname -a)"
+      - run: date -u
