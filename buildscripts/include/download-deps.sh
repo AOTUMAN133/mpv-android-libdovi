@@ -72,6 +72,15 @@ if [ ! -d lua ]; then
 		tar -xz -C lua --strip-components=1
 fi
 
+# libdovi (Dolby Vision RPU decoder, Rust). The crate lives inside the
+# dovi_tool monorepo under dolby_vision/. We pin to the tag so the
+# tarball checksum is stable across builds.
+if [ ! -d libdovi ]; then
+	mkdir libdovi
+	$WGET https://github.com/quietvoid/dovi_tool/archive/refs/tags/libdovi-${v_libdovi}.tar.gz -O - | \
+		tar -xz -C libdovi --strip-components=1
+fi
+
 # libplacebo
 [ ! -d libplacebo ] && git clone --recursive https://github.com/haasn/libplacebo
 

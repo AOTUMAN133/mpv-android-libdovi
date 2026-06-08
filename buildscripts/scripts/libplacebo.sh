@@ -14,8 +14,11 @@ else
 fi
 
 unset CC CXX
+# libdovi (built first by buildall.sh because depinfo lists it as a dep)
+# provides $prefix_dir/lib/pkgconfig/dovi.pc, which libplacebo's meson
+# picks up via dependency('dovi') when -Ddovi=enabled is set.
 meson setup $build --cross-file "$prefix_dir"/crossfile.txt \
-	-Dvulkan=disabled -Ddemos=false
+	-Dvulkan=disabled -Ddemos=false -Ddovi=enabled
 
 ninja -C $build -j$cores
 DESTDIR="$prefix_dir" ninja -C $build install
