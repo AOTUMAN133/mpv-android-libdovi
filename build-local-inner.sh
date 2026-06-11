@@ -11,21 +11,19 @@
 cd /src/buildscripts
 
 # Download Android NDK + dep tarballs (idempotent; skips already-downloaded).
-if [ ! -d sdk/android-ndk-* ] || [ ! -d deps/mpv ]; then
-    echo '── Downloading Android SDK/NDK + deps (first run) ──'
+# Use shopt+glob expansion since `[ -d foo* ]` doesn't expand globs.
+shopt -s nullglob
+ndk_dirs=(sdk/android-ndk-*)
+shopt -u nullglob
+if [ ${#ndk_dirs[@]} -eq 0 ] || [ ! -d deps/mpv ]; then
+    echo '── Downloading Android SDK/NDK + deps ──'
     ./download.sh
 fi
 
-# Build mpv for each ABI. buildall.sh walks the dep graph so libdovi →
-# libplacebo + libdovi → ffmpeg → libass → mpv all build in correct order.
-for arch in arm64 armv7l x86_64 x86; do
-    echo
-    echo "═══ Building for $arch ═══"
-    ./buildall.sh --arch "$arch" mpv
-done
-
-# Map our naming to Android ABI names + collect the produced .so files.
+# Build mpv for each ABI. mpv-android segregates output per-arch under
+# prefix/<arch>/lib/ so we just copy from there after each invocation.
 mkdir -p /dist
+
 for arch in arm64 armv7l x86_64 x86; do
     case "$arch" in
         arm64)  abi=arm64-v8a ;;
@@ -33,21 +31,38 @@ for arch in arm64 armv7l x86_64 x86; do
         x86_64) abi=x86_64 ;;
         x86)    abi=x86 ;;
     esac
-    mkdir -p "/dist/$abi"
-    # mpv-android writes built artifacts into prefix-<arch>/lib/
-    prefix_lib=$(find . -maxdepth 2 -type d -name "prefix-*$arch*" | head -1)/lib
+
+    echo
+    echo "═══ Building for $arch (→ /dist/$abi) ═══"
+    ./buildall.sh --arch "$arch" mpv
+
+    prefix_lib="prefix/$arch/lib"
     if [ ! -d "$prefix_lib" ]; then
-        echo "No prefix dir found for $arch — search: $(find . -maxdepth 2 -type d -name 'prefix-*' | tr '\n' ' ')"
+        echo "[FAIL] No $prefix_lib after building $arch — buildall.sh did not produce artifacts."
+        ls -la "prefix/$arch" 2>/dev/null || true
         continue
     fi
-    cp -v "$prefix_lib"/lib*.so "/dist/$abi/" 2>/dev/null || true
 
-    # Sanity: verify libdovi symbols are present in libmpv.so
+    # Snapshot every .so the build produced into the per-ABI dist dir.
+    mkdir -p "/dist/$abi"
+    rm -f "/dist/$abi"/*.so
+    found_so=0
+    for so in "$prefix_lib"/lib*.so; do
+        [ -f "$so" ] || continue
+        cp -v "$so" "/dist/$abi/"
+        found_so=1
+    done
+    if [ $found_so -eq 0 ]; then
+        echo "[WARN] No .so files in $prefix_lib (only static archives?). Contents:"
+        ls "$prefix_lib" | head -20
+    fi
+
+    # Verify libdovi symbols are in libmpv.so — the key sanity check.
     if [ -f "/dist/$abi/libmpv.so" ]; then
         echo "── DV symbols in $abi/libmpv.so ──"
         nm -D --defined-only "/dist/$abi/libmpv.so" 2>/dev/null | \
-            grep -iE 'dovi|reshape' | head -5 || \
-            echo "  (none found — libdovi not linked?)"
+            grep -iE 'dovi|reshape' | head -5 \
+          || echo "  (none — libdovi not linked into libmpv?)"
     fi
 done
 

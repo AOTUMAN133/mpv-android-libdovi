@@ -1,0 +1,294 @@
+diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+index 9a627c0..c00e8ed 100644
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -33,8 +33,11 @@
+ #include "libavutil/timestamp.h"
+ #include "libavutil/channel_layout.h"
+ 
++#include "libavutil/dovi_meta.h"
++
+ #include "avcodec.h"
+ #include "decode.h"
++#include "dovi_rpu.h"
+ 
+ #include "mediacodec.h"
+ #include "mediacodec_surface.h"
+@@ -244,6 +247,182 @@ static enum AVPixelFormat mcdec_map_color_format(AVCodecContext *avctx,
+     return ret;
+ }
+ 
++/*
++ * Dolby Vision RPU passthrough.
++ *
++ * MediaCodec decodes the base layer but is a black box for metadata:
++ * unlike the hwaccel-style decoders, nothing here parses the RPU NALs
++ * riding along in the bitstream, so single-layer profile 5 content
++ * (IPTPQc2-encoded base layer) decodes to unwatchable colours unless
++ * the renderer gets the reshaping metadata.
++ *
++ * Parse UNSPEC62 NALs from input packets with lavc's own DOVI machinery
++ * and attach the resulting AVDOVIMetadata to the matching output frame,
++ * keyed by the microsecond timestamp MediaCodec round-trips losslessly.
++ * Renderers (e.g. libplacebo) then apply the reshape on the GPU.
++ */
++
++static void mediacodec_dovi_pending_clear(MediaCodecDecContext *s)
++{
++    int i;
++    for (i = 0; i < s->dovi_pending_count; i++)
++        av_buffer_unref(&s->dovi_pending[i].metadata);
++    s->dovi_pending_count = 0;
++}
++
++static void mediacodec_dovi_uninit(MediaCodecDecContext *s)
++{
++    mediacodec_dovi_pending_clear(s);
++    if (s->dovi) {
++        ff_dovi_ctx_unref(s->dovi);
++        av_freep(&s->dovi);
++    }
++}
++
++static void mediacodec_dovi_init(AVCodecContext *avctx, MediaCodecDecContext *s)
++{
++    const AVPacketSideData *sd;
++    const AVDOVIDecoderConfigurationRecord *cfg;
++
++    if (avctx->codec_id != AV_CODEC_ID_HEVC)
++        return;
++
++    sd = av_packet_side_data_get(avctx->coded_side_data, avctx->nb_coded_side_data,
++                                 AV_PKT_DATA_DOVI_CONF);
++    if (!sd || sd->size < sizeof(*cfg))
++        return;
++    cfg = (const AVDOVIDecoderConfigurationRecord *)sd->data;
++
++    /* Single-layer streams only: the base layer must stand alone
++     * (profile 5 = IPTPQc2 BL, profile 8 = HDR10/HLG-compatible BL).
++     * Dual-layer profile 7 reshaping needs the enhancement layer, which
++     * MediaCodec does not decode — leave those frames untouched. */
++    if (!cfg->dv_profile || !cfg->bl_present_flag || cfg->el_present_flag)
++        return;
++
++    s->dovi = av_mallocz(sizeof(*s->dovi));
++    if (!s->dovi)
++        return;
++    s->dovi->logctx = avctx;
++    s->dovi->cfg = *cfg;
++
++    av_log(avctx, AV_LOG_INFO,
++           "Dolby Vision profile %d: RPU passthrough enabled\n",
++           cfg->dv_profile);
++}
++
++static const uint8_t *mediacodec_find_startcode(const uint8_t *p, const uint8_t *end)
++{
++    for (; p + 3 <= end; p++) {
++        if (p[0] == 0 && p[1] == 0 && p[2] == 1)
++            return p + 3;
++    }
++    return NULL;
++}
++
++static void mediacodec_dovi_parse_packet(AVCodecContext *avctx, MediaCodecDecContext *s,
++                                         const AVPacket *pkt, int64_t pts_us)
++{
++    const uint8_t *p = pkt->data;
++    const uint8_t *end = pkt->data + pkt->size;
++
++    if (!s->dovi)
++        return;
++
++    while ((p = mediacodec_find_startcode(p, end))) {
++        const uint8_t *nal_end;
++        int nal_size, rbsp_size, zeros, nal_type, i;
++        uint8_t *rbsp;
++
++        /* This NAL runs to the next start code; strip trailing zeros
++         * (they belong to a four-byte start code or are padding). */
++        nal_end = mediacodec_find_startcode(p, end);
++        nal_end = nal_end ? nal_end - 3 : end;
++        while (nal_end > p && nal_end[-1] == 0)
++            nal_end--;
++        nal_size = nal_end - p;
++        if (nal_size < 3) {
++            p = nal_end;
++            continue;
++        }
++
++        nal_type = (p[0] >> 1) & 0x3f;
++        if (nal_type != 62 /* HEVC_NAL_UNSPEC62: Dolby Vision RPU */) {
++            p = nal_end;
++            continue;
++        }
++
++        /* Unescape (drop emulation prevention bytes). */
++        rbsp = av_malloc(nal_size);
++        if (!rbsp)
++            return;
++        rbsp_size = 0;
++        zeros = 0;
++        for (i = 0; i < nal_size; i++) {
++            if (zeros >= 2 && p[i] == 3 && i + 1 < nal_size && p[i + 1] <= 3) {
++                zeros = 0;
++                continue;
++            }
++            zeros = p[i] ? 0 : zeros + 1;
++            rbsp[rbsp_size++] = p[i];
++        }
++
++        /* Mirror hevcdec: skip the two-byte NAL header, parse, then
++         * snapshot the decoded metadata keyed by this AU's timestamp. */
++        if (rbsp_size > 2 &&
++            ff_dovi_rpu_parse(s->dovi, rbsp + 2, rbsp_size - 2,
++                              avctx->err_recognition) >= 0) {
++            AVDOVIMetadata *metadata = NULL;
++            int size = ff_dovi_get_metadata(s->dovi, &metadata);
++            if (size > 0) {
++                AVBufferRef *buf = av_buffer_create((uint8_t *)metadata, size,
++                                                    NULL, NULL, 0);
++                if (!buf) {
++                    av_free(metadata);
++                } else {
++                    if (s->dovi_pending_count == MEDIACODEC_DOVI_PENDING_MAX) {
++                        av_buffer_unref(&s->dovi_pending[0].metadata);
++                        memmove(&s->dovi_pending[0], &s->dovi_pending[1],
++                                sizeof(s->dovi_pending[0]) * --s->dovi_pending_count);
++                    }
++                    s->dovi_pending[s->dovi_pending_count].pts = pts_us;
++                    s->dovi_pending[s->dovi_pending_count].metadata = buf;
++                    s->dovi_pending_count++;
++                }
++            }
++        } else if (rbsp_size > 2) {
++            av_log(avctx, AV_LOG_VERBOSE, "Error parsing DOVI NAL unit.\n");
++        }
++
++        av_free(rbsp);
++        p = nal_end;
++    }
++}
++
++static void mediacodec_dovi_attach(MediaCodecDecContext *s, int64_t pts_us,
++                                   AVFrame *frame)
++{
++    int i;
++
++    if (!s->dovi)
++        return;
++
++    for (i = 0; i < s->dovi_pending_count; i++) {
++        if (s->dovi_pending[i].pts != pts_us)
++            continue;
++        if (!av_frame_new_side_data_from_buf(frame, AV_FRAME_DATA_DOVI_METADATA,
++                                             s->dovi_pending[i].metadata)) {
++            /* Attach failed — the buffer is still ours to drop. On
++             * success the frame took ownership. */
++            av_buffer_unref(&s->dovi_pending[i].metadata);
++        }
++        memmove(&s->dovi_pending[i], &s->dovi_pending[i + 1],
++                sizeof(s->dovi_pending[0]) * (s->dovi_pending_count - i - 1));
++        s->dovi_pending_count--;
++        return;
++    }
++}
++
+ static void ff_mediacodec_dec_ref(MediaCodecDecContext *s)
+ {
+     atomic_fetch_add(&s->refcount, 1);
+@@ -270,6 +449,8 @@ static void ff_mediacodec_dec_unref(MediaCodecDecContext *s)
+             s->surface = NULL;
+         }
+ 
++        mediacodec_dovi_uninit(s);
++
+         av_freep(&s->codec_name);
+         av_freep(&s);
+     }
+@@ -322,6 +503,8 @@ static int mediacodec_wrap_hw_buffer(AVCodecContext *avctx,
+     frame->color_trc = avctx->color_trc;
+     frame->colorspace = avctx->colorspace;
+ 
++    mediacodec_dovi_attach(s, info->presentationTimeUs, frame);
++
+     buffer = av_mallocz(sizeof(AVMediaCodecBuffer));
+     if (!buffer) {
+         ret = AVERROR(ENOMEM);
+@@ -477,6 +660,8 @@ static int mediacodec_wrap_sw_video_buffer(AVCodecContext *avctx,
+     }
+     frame->pkt_dts = AV_NOPTS_VALUE;
+ 
++    mediacodec_dovi_attach(s, info->presentationTimeUs, frame);
++
+     av_log(avctx, AV_LOG_TRACE,
+             "Frame: width=%d stride=%d height=%d slice-height=%d "
+             "crop-top=%d crop-bottom=%d crop-left=%d crop-right=%d encoder=%s "
+@@ -724,6 +909,12 @@ static int mediacodec_dec_flush_codec(AVCodecContext *avctx, MediaCodecDecContex
+ 
+     s->output_buffer_count = 0;
+ 
++    /* Drop queued RPUs (their frames are being discarded) but keep the
++     * stream-wide DV configuration for the post-seek frames. */
++    mediacodec_dovi_pending_clear(s);
++    if (s->dovi)
++        ff_dovi_ctx_flush(s->dovi);
++
+     s->draining = 0;
+     s->flushing = 0;
+     s->eos = 0;
+@@ -838,6 +1029,8 @@ int ff_mediacodec_dec_init(AVCodecContext *avctx, MediaCodecDecContext *s,
+     atomic_init(&s->serial, 1);
+     s->current_input_buffer = -1;
+ 
++    mediacodec_dovi_init(avctx, s);
++
+     if (avctx->codec_type == AVMEDIA_TYPE_AUDIO)
+         ret = mediacodec_dec_get_audio_codec(avctx, s, mime, format);
+     else if (avctx->codec_type == AVMEDIA_TYPE_VIDEO)
+@@ -948,6 +1141,11 @@ int ff_mediacodec_dec_send(AVCodecContext *avctx, MediaCodecDecContext *s,
+             pts = av_rescale_q(pts, avctx->pkt_timebase, AV_TIME_BASE_Q);
+         }
+ 
++        /* Parse Dolby Vision RPUs once per packet, keyed by the same
++         * microsecond timestamp we queue the buffers with. */
++        if (offset == 0 && pkt->size > 0)
++            mediacodec_dovi_parse_packet(avctx, s, pkt, pts);
++
+         if (need_draining) {
+             uint32_t flags = ff_AMediaCodec_getBufferFlagEndOfStream(codec);
+ 
+diff --git a/libavcodec/mediacodecdec_common.h b/libavcodec/mediacodecdec_common.h
+index 0ab2903..e2d1cb4 100644
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -34,6 +34,10 @@
+ #include "avcodec.h"
+ #include "mediacodec_wrapper.h"
+ 
++struct DOVIContext;
++
++#define MEDIACODEC_DOVI_PENDING_MAX 32
++
+ typedef struct MediaCodecDecContext {
+ 
+     AVCodecContext *avctx;
+@@ -71,6 +75,18 @@ typedef struct MediaCodecDecContext {
+     atomic_int serial;
+ 
+     bool use_ndk_codec;
++
++    /* Dolby Vision RPU passthrough (single-layer HEVC). RPUs are parsed
++     * from UNSPEC62 NALs at send time and attached to the matching
++     * output frame, keyed by the microsecond timestamp that MediaCodec
++     * round-trips losslessly. NULL when the stream carries no usable
++     * DV configuration record. */
++    struct DOVIContext *dovi;
++    struct {
++        int64_t pts;
++        AVBufferRef *metadata;
++    } dovi_pending[MEDIACODEC_DOVI_PENDING_MAX];
++    int dovi_pending_count;
+ } MediaCodecDecContext;
+ 
+ int ff_mediacodec_dec_init(AVCodecContext *avctx,

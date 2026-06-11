@@ -11,6 +11,24 @@ else
 	exit 255
 fi
 
+# Local patches (Dolby Vision RPU passthrough in the mediacodec wrapper
+# — what makes single-layer DV P5/P8 reshape work with HW decode).
+# Idempotent: a patch already present in the tree is skipped; a patch
+# that no longer applies aborts the build loudly so we notice upstream
+# drift instead of silently shipping without it.
+for p in ../../patches/ffmpeg/*.patch; do
+	[ -e "$p" ] || continue
+	if git apply --reverse --check "$p" 2>/dev/null; then
+		echo "ffmpeg patch already applied: $(basename "$p")"
+	elif git apply --check "$p" 2>/dev/null; then
+		echo "applying ffmpeg patch: $(basename "$p")"
+		git apply "$p"
+	else
+		echo "ERROR: ffmpeg patch does not apply: $(basename "$p")" >&2
+		exit 1
+	fi
+done
+
 mkdir -p _build$ndk_suffix
 cd _build$ndk_suffix
 
@@ -28,7 +46,7 @@ args=(
 	--arch=${ndk_triple%%-*} --cpu=$cpu
 	--extra-cflags="-I$prefix_dir/include $cpuflags" --extra-ldflags="-L$prefix_dir/lib"
 
-	--enable-{jni,mediacodec,mbedtls,libdav1d,libxml2,libdovi} --disable-vulkan
+	--enable-{jni,mediacodec,mbedtls,libdav1d,libxml2} --disable-vulkan
 	--disable-static --enable-shared --enable-{gpl,version3}
 
 	# disable unneeded parts
