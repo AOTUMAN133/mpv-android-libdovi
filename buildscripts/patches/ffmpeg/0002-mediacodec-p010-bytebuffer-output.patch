@@ -78,10 +78,19 @@ index 574fb52..51389f1 100644
                                                       MediaCodecDecContext *s,
                                                       uint8_t *data,
 diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
-index 6cea7e9..47c4435 100644
+index 6cea7e9..4f65d12 100644
 --- a/libavcodec/mediacodecdec_common.c
 +++ b/libavcodec/mediacodecdec_common.c
-@@ -195,6 +195,8 @@ enum {
+@@ -23,6 +23,8 @@
+ #include <string.h>
+ #include <sys/types.h>
+ 
++#include <android/api-level.h>
++
+ #include "libavutil/avassert.h"
+ #include "libavutil/common.h"
+ #include "libavutil/hwcontext_mediacodec.h"
+@@ -195,6 +197,8 @@ enum {
      COLOR_FormatYUV420Planar                              = 0x13,
      COLOR_FormatYUV420SemiPlanar                          = 0x15,
      COLOR_FormatYCbYCr                                    = 0x19,
@@ -90,7 +99,7 @@ index 6cea7e9..47c4435 100644
      COLOR_FormatAndroidOpaque                             = 0x7F000789,
      COLOR_QCOM_FormatYUV420SemiPlanar                     = 0x7fa30c00,
      COLOR_QCOM_FormatYUV420SemiPlanar32m                  = 0x7fa30c04,
-@@ -212,6 +214,7 @@ static const struct {
+@@ -212,6 +216,7 @@ static const struct {
  
      { COLOR_FormatYUV420Planar,                              AV_PIX_FMT_YUV420P },
      { COLOR_FormatYUV420SemiPlanar,                          AV_PIX_FMT_NV12    },
@@ -98,7 +107,7 @@ index 6cea7e9..47c4435 100644
      { COLOR_QCOM_FormatYUV420SemiPlanar,                     AV_PIX_FMT_NV12    },
      { COLOR_QCOM_FormatYUV420SemiPlanar32m,                  AV_PIX_FMT_NV12    },
      { COLOR_QCOM_FormatYUV420PackedSemiPlanar64x32Tile2m8ka, AV_PIX_FMT_NV12    },
-@@ -679,6 +682,9 @@ static int mediacodec_wrap_sw_video_buffer(AVCodecContext *avctx,
+@@ -679,6 +684,9 @@ static int mediacodec_wrap_sw_video_buffer(AVCodecContext *avctx,
      case COLOR_QCOM_FormatYUV420SemiPlanar32m:
          ff_mediacodec_sw_buffer_copy_yuv420_semi_planar(avctx, s, data, size, info, frame);
          break;
@@ -108,7 +117,7 @@ index 6cea7e9..47c4435 100644
      case COLOR_TI_FormatYUV420PackedSemiPlanar:
      case COLOR_TI_FormatYUV420PackedSemiPlanarInterlaced:
          ff_mediacodec_sw_buffer_copy_yuv420_packed_semi_planar(avctx, s, data, size, info, frame);
-@@ -780,6 +786,12 @@ static int mediacodec_dec_parse_video_format(AVCodecContext *avctx, MediaCodecDe
+@@ -780,6 +788,12 @@ static int mediacodec_dec_parse_video_format(AVCodecContext *avctx, MediaCodecDe
          goto fail;
      }
  
@@ -121,7 +130,7 @@ index 6cea7e9..47c4435 100644
      /* Optional fields */
      AMEDIAFORMAT_GET_INT32(s->crop_top,    "crop-top",    0);
      AMEDIAFORMAT_GET_INT32(s->crop_bottom, "crop-bottom", 0);
-@@ -929,6 +941,40 @@ static int mediacodec_dec_flush_codec(AVCodecContext *avctx, MediaCodecDecContex
+@@ -929,6 +943,46 @@ static int mediacodec_dec_flush_codec(AVCodecContext *avctx, MediaCodecDecContex
      return 0;
  }
  
@@ -142,7 +151,10 @@ index 6cea7e9..47c4435 100644
 +
 +    switch (avctx->codec_id) {
 +    case AV_CODEC_ID_HEVC:
-+        is_10bit = avctx->profile == AV_PROFILE_HEVC_MAIN_10;
++        /* Some DV P5 encodes do not signal Main10 cleanly, but every
++         * Dolby Vision stream is 10-bit — and mediacodec_dovi_init has
++         * already parsed the configuration record by this point. */
++        is_10bit = avctx->profile == AV_PROFILE_HEVC_MAIN_10 || s->dovi != NULL;
 +        break;
 +    case AV_CODEC_ID_VP9:
 +        is_10bit = avctx->profile == AV_PROFILE_VP9_2;
@@ -150,7 +162,10 @@ index 6cea7e9..47c4435 100644
 +    default:
 +        is_10bit = 0;
 +    }
-+    if (!is_10bit || ff_Build_SDK_INT(avctx) < 33)
++    /* android_get_device_api_level() reads ro.build.version.sdk through
++     * the NDK; unlike ff_Build_SDK_INT it does not need a JavaVM, which
++     * is never registered when mpv drives the pure-NDK codec path. */
++    if (!is_10bit || android_get_device_api_level() < 33)
 +        return 0;
 +
 +    ff_AMediaFormat_setInt32(format, "color-format", COLOR_FormatYUVP010);
@@ -162,7 +177,7 @@ index 6cea7e9..47c4435 100644
  static int mediacodec_dec_get_video_codec(AVCodecContext *avctx, MediaCodecDecContext *s,
                                            const char *mime, FFAMediaFormat *format)
  {
-@@ -1020,6 +1066,7 @@ int ff_mediacodec_dec_init(AVCodecContext *avctx, MediaCodecDecContext *s,
+@@ -1020,6 +1074,7 @@ int ff_mediacodec_dec_init(AVCodecContext *avctx, MediaCodecDecContext *s,
  {
      int ret;
      int status;
@@ -170,7 +185,7 @@ index 6cea7e9..47c4435 100644
  
      s->avctx = avctx;
      atomic_init(&s->refcount, 1);
-@@ -1038,7 +1085,20 @@ int ff_mediacodec_dec_init(AVCodecContext *avctx, MediaCodecDecContext *s,
+@@ -1038,7 +1093,20 @@ int ff_mediacodec_dec_init(AVCodecContext *avctx, MediaCodecDecContext *s,
      if (ret < 0)
          goto fail;
  
