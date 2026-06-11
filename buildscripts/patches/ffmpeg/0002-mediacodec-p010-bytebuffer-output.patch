@@ -1,0 +1,193 @@
+diff --git a/libavcodec/mediacodec_sw_buffer.c b/libavcodec/mediacodec_sw_buffer.c
+index 92428e8..cdbaf7e 100644
+--- a/libavcodec/mediacodec_sw_buffer.c
++++ b/libavcodec/mediacodec_sw_buffer.c
+@@ -178,6 +178,56 @@ void ff_mediacodec_sw_buffer_copy_yuv420_semi_planar(AVCodecContext *avctx,
+ 
+ 
+ 
++/* P010: NV12's memory layout at two bytes per sample. s->stride and the
++ * crop offsets computed below are all in bytes. */
++void ff_mediacodec_sw_buffer_copy_p010(AVCodecContext *avctx,
++                                       MediaCodecDecContext *s,
++                                       uint8_t *data,
++                                       size_t size,
++                                       FFAMediaCodecBufferInfo *info,
++                                       AVFrame *frame)
++{
++    int i;
++    uint8_t *src = NULL;
++
++    for (i = 0; i < 2; i++) {
++        int height;
++
++        src = data + info->offset;
++        if (i == 0) {
++            height = avctx->height;
++
++            src += s->crop_top * s->stride;
++            src += s->crop_left * 2;
++        } else if (i == 1) {
++            height = avctx->height / 2;
++
++            src += s->slice_height * s->stride;
++            src += s->crop_top * s->stride;
++            src += s->crop_left * 2;
++        }
++
++        if (frame->linesize[i] == s->stride) {
++            memcpy(frame->data[i], src, height * s->stride);
++        } else {
++            int j, width;
++            uint8_t *dst = frame->data[i];
++
++            if (i == 0) {
++                width = avctx->width * 2;
++            } else if (i == 1) {
++                width = FFMIN(frame->linesize[i], FFALIGN(avctx->width, 2) * 2);
++            }
++
++            for (j = 0; j < height; j++) {
++                memcpy(dst, src, width);
++                src += s->stride;
++                dst += frame->linesize[i];
++            }
++        }
++    }
++}
++
+ void ff_mediacodec_sw_buffer_copy_yuv420_packed_semi_planar(AVCodecContext *avctx,
+                                                             MediaCodecDecContext *s,
+                                                             uint8_t *data,
+diff --git a/libavcodec/mediacodec_sw_buffer.h b/libavcodec/mediacodec_sw_buffer.h
+index 574fb52..51389f1 100644
+--- a/libavcodec/mediacodec_sw_buffer.h
++++ b/libavcodec/mediacodec_sw_buffer.h
+@@ -45,6 +45,13 @@ void ff_mediacodec_sw_buffer_copy_yuv420_semi_planar(AVCodecContext *avctx,
+                                                      FFAMediaCodecBufferInfo *info,
+                                                      AVFrame *frame);
+ 
++void ff_mediacodec_sw_buffer_copy_p010(AVCodecContext *avctx,
++                                       MediaCodecDecContext *s,
++                                       uint8_t *data,
++                                       size_t size,
++                                       FFAMediaCodecBufferInfo *info,
++                                       AVFrame *frame);
++
+ void ff_mediacodec_sw_buffer_copy_yuv420_packed_semi_planar(AVCodecContext *avctx,
+                                                      MediaCodecDecContext *s,
+                                                      uint8_t *data,
+diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+index 6cea7e9..47c4435 100644
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -195,6 +195,8 @@ enum {
+     COLOR_FormatYUV420Planar                              = 0x13,
+     COLOR_FormatYUV420SemiPlanar                          = 0x15,
+     COLOR_FormatYCbYCr                                    = 0x19,
++    COLOR_FormatYUVP010                                   = 0x36,
++    COLOR_FormatYUV420Flexible                            = 0x7F420888,
+     COLOR_FormatAndroidOpaque                             = 0x7F000789,
+     COLOR_QCOM_FormatYUV420SemiPlanar                     = 0x7fa30c00,
+     COLOR_QCOM_FormatYUV420SemiPlanar32m                  = 0x7fa30c04,
+@@ -212,6 +214,7 @@ static const struct {
+ 
+     { COLOR_FormatYUV420Planar,                              AV_PIX_FMT_YUV420P },
+     { COLOR_FormatYUV420SemiPlanar,                          AV_PIX_FMT_NV12    },
++    { COLOR_FormatYUVP010,                                   AV_PIX_FMT_P010LE  },
+     { COLOR_QCOM_FormatYUV420SemiPlanar,                     AV_PIX_FMT_NV12    },
+     { COLOR_QCOM_FormatYUV420SemiPlanar32m,                  AV_PIX_FMT_NV12    },
+     { COLOR_QCOM_FormatYUV420PackedSemiPlanar64x32Tile2m8ka, AV_PIX_FMT_NV12    },
+@@ -679,6 +682,9 @@ static int mediacodec_wrap_sw_video_buffer(AVCodecContext *avctx,
+     case COLOR_QCOM_FormatYUV420SemiPlanar32m:
+         ff_mediacodec_sw_buffer_copy_yuv420_semi_planar(avctx, s, data, size, info, frame);
+         break;
++    case COLOR_FormatYUVP010:
++        ff_mediacodec_sw_buffer_copy_p010(avctx, s, data, size, info, frame);
++        break;
+     case COLOR_TI_FormatYUV420PackedSemiPlanar:
+     case COLOR_TI_FormatYUV420PackedSemiPlanarInterlaced:
+         ff_mediacodec_sw_buffer_copy_yuv420_packed_semi_planar(avctx, s, data, size, info, frame);
+@@ -780,6 +786,12 @@ static int mediacodec_dec_parse_video_format(AVCodecContext *avctx, MediaCodecDe
+         goto fail;
+     }
+ 
++    /* P010 row strides are in bytes (two per sample). Some decoders
++     * report them in pixels instead — normalise so the copy path can
++     * always work in bytes. */
++    if (s->color_format == COLOR_FormatYUVP010 && s->stride < s->width * 2)
++        s->stride = s->width * 2;
++
+     /* Optional fields */
+     AMEDIAFORMAT_GET_INT32(s->crop_top,    "crop-top",    0);
+     AMEDIAFORMAT_GET_INT32(s->crop_bottom, "crop-bottom", 0);
+@@ -929,6 +941,40 @@ static int mediacodec_dec_flush_codec(AVCodecContext *avctx, MediaCodecDecContex
+     return 0;
+ }
+ 
++/*
++ * 10-bit streams decoded to ByteBuffers come out as 8-bit NV12 unless the
++ * codec is asked for COLOR_FormatYUVP010 explicitly. Android 13's CTS makes
++ * P010 output mandatory for every decoder that supports a 10-bit profile,
++ * so on API >= 33 the request is safe; should a codec reject it anyway,
++ * ff_mediacodec_dec_init retries the configure without it.
++ */
++static int mediacodec_request_p010(AVCodecContext *avctx, MediaCodecDecContext *s,
++                                   FFAMediaFormat *format)
++{
++    int is_10bit;
++
++    if (s->surface)
++        return 0;
++
++    switch (avctx->codec_id) {
++    case AV_CODEC_ID_HEVC:
++        is_10bit = avctx->profile == AV_PROFILE_HEVC_MAIN_10;
++        break;
++    case AV_CODEC_ID_VP9:
++        is_10bit = avctx->profile == AV_PROFILE_VP9_2;
++        break;
++    default:
++        is_10bit = 0;
++    }
++    if (!is_10bit || ff_Build_SDK_INT(avctx) < 33)
++        return 0;
++
++    ff_AMediaFormat_setInt32(format, "color-format", COLOR_FormatYUVP010);
++    av_log(avctx, AV_LOG_INFO,
++           "Requesting P010 ByteBuffer output for the 10-bit stream\n");
++    return 1;
++}
++
+ static int mediacodec_dec_get_video_codec(AVCodecContext *avctx, MediaCodecDecContext *s,
+                                           const char *mime, FFAMediaFormat *format)
+ {
+@@ -1020,6 +1066,7 @@ int ff_mediacodec_dec_init(AVCodecContext *avctx, MediaCodecDecContext *s,
+ {
+     int ret;
+     int status;
++    int requested_p010;
+ 
+     s->avctx = avctx;
+     atomic_init(&s->refcount, 1);
+@@ -1038,7 +1085,20 @@ int ff_mediacodec_dec_init(AVCodecContext *avctx, MediaCodecDecContext *s,
+     if (ret < 0)
+         goto fail;
+ 
++    requested_p010 = avctx->codec_type == AVMEDIA_TYPE_VIDEO &&
++                     mediacodec_request_p010(avctx, s, format);
++
+     status = ff_AMediaCodec_configure(s->codec, format, s->surface, NULL, 0);
++    if (status < 0 && requested_p010) {
++        /* P010 refused — a failed configure() returns the codec to the
++         * Uninitialized state, so fall back to the universally supported
++         * flexible (8-bit) output and configure again. */
++        av_log(avctx, AV_LOG_WARNING,
++               "Codec %s rejected P010 output (status = %d), retrying 8-bit\n",
++               s->codec_name, status);
++        ff_AMediaFormat_setInt32(format, "color-format", COLOR_FormatYUV420Flexible);
++        status = ff_AMediaCodec_configure(s->codec, format, s->surface, NULL, 0);
++    }
+     if (status < 0) {
+         char *desc = ff_AMediaFormat_toString(format);
+         av_log(avctx, AV_LOG_ERROR,
