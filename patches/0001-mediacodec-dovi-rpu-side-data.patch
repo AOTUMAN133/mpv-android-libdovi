@@ -4,8 +4,8 @@ Date: Sat, 15 Aug 2026 16:00:00 +0800
 Subject: [PATCH] mediacodec: attach DOVI RPU side data to output frames
 
 ---
---- a/libavcodec/mediacodecdec.c	2026-08-15 18:09:31.161977266 +0000
-+++ b/libavcodec/mediacodecdec.c	2026-08-15 18:09:31.161977266 +0000
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
 @@ -44,6 +44,11 @@
  #include "jni.h"
  #include "mediacodec_wrapper.h"
@@ -70,10 +70,10 @@ Subject: [PATCH] mediacodec: attach DOVI RPU side data to output frames
          if (ret < 0)
              goto done;
          break;
-@@ -493,6 +529,66 @@
+@@ -492,6 +528,66 @@
+     int ret;
      ssize_t index;
  
-     /* In delay_flush mode, wait until the user has released or rendered
 +    /* For HEVC: extract RPU NAL from input packet before sending to MediaCodec.
 +     * Dolby Vision RPUs masquerade as unregistered NALs of type 62 (HEVC_NAL_UNSPEC62).
 +     */
@@ -134,21 +134,10 @@ Subject: [PATCH] mediacodec: attach DOVI RPU side data to output frames
 +            }
 +        }
 +    }
+     /* In delay_flush mode, wait until the user has released or rendered
         all retained frames. */
      if (s->delay_flush && ff_mediacodec_dec_is_flushing(avctx, s->ctx)) {
-         if (!ff_mediacodec_dec_flush(avctx, s->ctx)) {
-@@ -534,6 +630,10 @@
-                 s->buffered_pkt.data += ret;
-                 if (s->buffered_pkt.size <= 0) {
-                     av_packet_unref(&s->buffered_pkt);
-+    if (s->initialized_dovi) {
-+        ff_dovi_ctx_unref(&s->dovi_ctx);
-+        av_buffer_unref(&s->rpu_buf);
-+    }
-                 } else {
-                     av_log(avctx, AV_LOG_WARNING,
-                            "could not send entire packet in single input buffer (%d < %d)\n",
-@@ -558,9 +658,27 @@
+@@ -558,9 +654,27 @@
              ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
              if (ret < 0)
                  return ret;
@@ -178,16 +167,12 @@ Subject: [PATCH] mediacodec: attach DOVI RPU side data to output frames
          } else if (ret < 0) {
              return ret;
          }
-@@ -574,6 +692,14 @@
+@@ -574,6 +688,10 @@
      MediaCodecContext *s = avctx->priv_data;
  
      av_packet_unref(&s->buffered_pkt);
 +    if (s->initialized_dovi) {
 +        ff_dovi_ctx_flush(&s->dovi_ctx);
-+        av_buffer_unref(&s->rpu_buf);
-+    }
-+    if (s->initialized_dovi) {
-+        ff_dovi_ctx_unref(&s->dovi_ctx);
 +        av_buffer_unref(&s->rpu_buf);
 +    }
  
