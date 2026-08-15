@@ -32,7 +32,7 @@ build_prefix() {
 	IN_CI=1 ./include/download-deps.sh
 
 	msg "Compiling"
-	./buildall.sh --only-deps mpv
+	./buildall.sh --only-deps mpv --arch arm64
 
 	if [[ "$CACHE_MODE" == folder && -w "$CACHE_FOLDER" ]]; then
 		msg "Compressing the prefix"
@@ -84,7 +84,7 @@ else
 fi
 
 msg "Building mpv"
-./buildall.sh -n mpv || {
+./buildall.sh -n --arch arm64 mpv || {
 	# show logfile if configure failed
 	[ ! -f deps/mpv/_build_armv7l/config.h ] && \
 		cat deps/mpv/_build_armv7l/meson-logs/meson-log.txt
@@ -92,11 +92,11 @@ msg "Building mpv"
 }
 
 msg "Building mpv-android"
-./buildall.sh -n
+./buildall.sh -n --arch arm64
 
 # Workaround: copy arm64-v8a APK to the upload path (workflow only uploads armeabi-v7a)
-ARM64_APK="../app/build/outputs/apk/default/arm64/app-default-arm64-v8a-debug.apk"
-ARM32_APK="../app/build/outputs/apk/default/armv7/app-default-armeabi-v7a-debug.apk"
+ARM64_APK="../app/build/outputs/apk/default/debug/app-default-arm64-v8a-debug.apk"
+ARM32_APK="../app/build/outputs/apk/default/debug/app-default-armeabi-v7a-debug.apk"
 if [ -f "$ARM64_APK" ]; then
 	msg "Copying arm64-v8a APK to upload path"
 	cp "$ARM64_APK" "$ARM32_APK"
