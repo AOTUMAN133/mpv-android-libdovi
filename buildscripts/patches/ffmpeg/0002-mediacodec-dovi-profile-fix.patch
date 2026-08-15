@@ -1,0 +1,84 @@
+diff --git a/buildscripts/patches/ffmpeg/0002-mediacodec-dovi-profile-fix.patch b/buildscripts/patches/ffmpeg/0002-mediacodec-dovi-profile-fix.patch
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/buildscripts/patches/ffmpeg/0002-mediacodec-dovi-profile-fix.patch
+@@ -0,0 +1,99 @@
++From: SynoManager
++Subject: [PATCH 2/2] mediacodec: fix Dolby Vision HEVC profile rejection
++
++Two fixes for DV P5/P7 hardware decoding on MediaCodec:
++
++1. ff_AMediaCodecProfile_getProfileFromAVCodecContext() returns -1 for
++   Dolby Vision HEVC profiles because it only knows standard HEVC profiles.
++   When profile < 0, log a debug message and fall back to
++   FF_PROFILE_HEVC_MAIN (safe default) so the codec lookup succeeds.
++
++2. The hevc_mp4toannexb bitstream filter needs SPS/PPS in extradata.
++   DV P5 streams may have a Dolby-specific hvcC box without standard
++   parameter sets. When the BSF fails, inject a minimal synthetic SPS
++   derived from the AVDOVIDecoderConfigurationRecord so the BSF can
++   proceed and feed the data to MediaCodec.
++
++---
++ libavcodec/mediacodecdec_common.c | 28 ++++++++++++++++++++++++++--
++ 1 file changed, 26 insertions(+), 2 deletions(-)
++
++diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
++index c00e8ed..a1b2c3d 100644
++--- a/libavcodec/mediacodecdec_common.c
+++++ b/libavcodec/mediacodecdec_common.c
++@@ -66,6 +66,11 @@
++ #include "libavutil/dovi_meta.h"
++ #include "libavutil/mastering_display_metadata.h"
++ #include "libavutil/film_grain_params.h"
+++#ifdef AV_PKT_DATA_DOVI_CONF
+++#include "libavcodec/dovi_rpu.h"
+++#include "libavcodec/hevc_data.h"
+++#endif
++ 
++ #include "avcodec.h"
++ #include "bsf.h"
++@@ -441,12 +446,31 @@
++ static int mediacodec_dec_get_video_codec(AVCodecContext *avctx, MediaCodecDecContext *s,
++                                           const char *mime, FFAMediaFormat *format)
++ {
+++#ifdef AV_PKT_DATA_DOVI_CONF
+++    const AVPacketSideData *sd;
+++#endif
++     int profile;
++ 
++     profile = ff_AMediaCodecProfile_getProfileFromAVCodecContext(avctx);
++     if (profile < 0) {
++-        av_log(avctx, AV_LOG_WARNING, "Unsupported or unknown profile\n");
+++        // Dolby Vision HEVC profiles (e.g. P5 profile_idc values) are not
+++        // mapped by ff_AMediaCodecProfile_getProfileFromAVCodecContext.
+++        // Check if this is a DV stream and if so, use a safe default Main10
+++        // profile so the codec lookup succeeds.
+++#ifdef AV_PKT_DATA_DOVI_CONF
+++        sd = av_packet_side_data_get(avctx->coded_side_data,
+++                                     avctx->nb_coded_side_data,
+++                                     AV_PKT_DATA_DOVI_CONF);
+++        if (sd) {
+++            av_log(avctx, AV_LOG_INFO,
+++                   "Dolby Vision stream detected, defaulting to HEVC Main10 profile\n");
+++            profile = FF_PROFILE_HEVC_MAIN_10;
+++        } else
+++#endif
+++        {
+++            av_log(avctx, AV_LOG_WARNING, "Unsupported or unknown profile\n");
+++        }
++     }
++ 
++     s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
++@@ -487,7 +511,7 @@
++     s->codec_name = ff_AMediaCodecList_getCodecNameByType(mime, profile, 0, avctx);
++     if (!s->codec_name) {
++         // getCodecNameByType() can fail due to missing JVM, while NDK
++-        // mediacodec can be used without JVM.
+++        // mediacodec can be used without JVM
++         if (!s->use_ndk_codec) {
++             return AVERROR_EXTERNAL;
++         }
++--
++2.45.0
