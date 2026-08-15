@@ -22,6 +22,14 @@ cpu=armv7-a
 cpuflags=
 [[ "$ndk_triple" == "arm"* ]] && cpuflags="$cpuflags -mfpu=neon -mcpu=cortex-a8"
 
+# Apply SynoManager DOVI RPU patch if not already applied
+if [ -f ../../patches/0001-mediacodec-dovi-rpu-side-data.patch ] && ! grep -q "Dolby Vision RPU capture (for HEVC only)" libavcodec/mediacodecdec.c 2>/dev/null; then
+	echo "Applying DOVI RPU mediacodec patch"
+	patch -p1 -s < ../../patches/0001-mediacodec-dovi-rpu-side-data.patch || {
+		echo "WARNING: DOVI RPU patch failed to apply cleanly, continuing without it"
+	}
+fi
+
 args=(
 	--target-os=android --enable-cross-compile
 	--cross-prefix=$ndk_triple- --cc=$CC --pkg-config=pkg-config --nm=llvm-nm
