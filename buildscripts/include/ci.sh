@@ -55,7 +55,15 @@ elif [ "$1" = "install" ]; then
 		ln -sv "$ANDROID_HOME" sdk/android-sdk-linux
 	fi
 
-	msg "Fetching SDK + NDK"
+	msg "Installing cargo-c (for libdovi Rust build)"
+if ! command -v cargo-cinstall >/dev/null 2>&1 && ! command -v cinstall >/dev/null 2>&1; then
+	curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+	sh /tmp/rustup.sh -y --profile minimal
+	. "$HOME/.cargo/env"
+	cargo install cargo-c
+fi
+
+msg "Fetching SDK + NDK"
 	IN_CI=1 ./include/download-sdk.sh
 
 	msg "Fetching mpv"
