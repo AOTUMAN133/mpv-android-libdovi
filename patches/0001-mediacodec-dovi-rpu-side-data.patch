@@ -11,33 +11,51 @@ dolby-vision=yes (hardware decode + correct color).
 
 ---
 diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
-index 0822482..8aa9a98 100644
+index 8aa9a98..d5da5b9 100644
 --- a/libavcodec/mediacodecdec.c
 +++ b/libavcodec/mediacodecdec.c
-@@ -79,6 +79,10 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
-     ff_mediacodec_dec_close(avctx, s->ctx);
-     s->ctx = NULL;
+@@ -49,6 +49,11 @@
+ #include "libavutil/frame.h"
+ #include "libavutil/mastering_display_metadata.h"
+ #include "libavutil/film_grain_params.h"
++#include "dovi_rpu.h"
++#include "libavutil/buffer.h"
++#include "libavutil/frame.h"
++#include "libavutil/mastering_display_metadata.h"
++#include "libavutil/film_grain_params.h"
  
+ typedef struct MediaCodecContext {
+ 
+@@ -70,6 +75,12 @@ typedef struct MediaCodecContext {
+     AVBufferRef *rpu_buf;
+     int initialized_dovi;
+     int dovi_conf_parsed;
++
++    // Dolby Vision RPU capture (for HEVC only)
++    DOVIContext dovi_ctx;
++    AVBufferRef *rpu_buf;
++    int initialized_dovi;
++    int dovi_conf_parsed;
+ } MediaCodecContext;
+ 
+ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+@@ -84,6 +95,10 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+         av_buffer_unref(&s->rpu_buf);
+     }
+     av_packet_unref(&s->buffered_pkt);
 +    if (s->initialized_dovi) {
 +        ff_dovi_ctx_unref(&s->dovi_ctx);
 +        av_buffer_unref(&s->rpu_buf);
 +    }
-     av_packet_unref(&s->buffered_pkt);
  
      return 0;
-@@ -360,6 +364,28 @@ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
-         codec_mime = "video/hevc";
+ }
+@@ -370,6 +385,27 @@ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
+         s->dovi_ctx.logctx = avctx;
+         s->initialized_dovi = 1;
  
-         ret = hevc_set_extradata(avctx, format);
-+
-+        // Initialize DOVI context for HEVC
-+        memset(&s->dovi_ctx, 0, sizeof(s->dovi_ctx));
-+        s->dovi_ctx.logctx = avctx;
-+        s->initialized_dovi = 1;
-+
 +        // Parse DOVI configuration from extradata
 +        if (avctx->extradata && avctx->extradata_size > 0) {
-+            // Try to get DOVI conf from AVPacket side data
 +            for (int i = 0; i < avctx->nb_coded_side_data; i++) {
 +                if (avctx->coded_side_data[i].type == AV_PKT_DATA_DOVI_CONF) {
 +                    if (avctx->coded_side_data[i].size >= sizeof(s->dovi_ctx.cfg)) {
@@ -51,19 +69,23 @@ index 0822482..8aa9a98 100644
 +                }
 +            }
 +        }
-         if (ret < 0)
-             goto done;
-         break;
-@@ -503,6 +529,80 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
-     int ret;
-     ssize_t index;
- 
++
++        // Initialize DOVI context for HEVC
++        memset(&s->dovi_ctx, 0, sizeof(s->dovi_ctx));
++        s->dovi_ctx.logctx = avctx;
++        s->initialized_dovi = 1;
++
+         // Parse DOVI configuration from extradata
+         if (avctx->extradata && avctx->extradata_size > 0) {
+             // Try to get DOVI conf from AVPacket side data
+@@ -604,6 +640,66 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+         }
+     }
+     /* In delay_flush mode, wait until the user has released or rendered
 +    /* For HEVC: extract RPU NAL from input packet before sending to MediaCodec.
 +     * Dolby Vision RPUs masquerade as unregistered NALs of type 62 (HEVC_NAL_UNSPEC62).
-+     * This mirrors the logic in libavcodec/hevc/hevcdec.c (lines 3752-3789).
 +     */
 +    if (avctx->codec_id == AV_CODEC_ID_HEVC && s->initialized_dovi) {
-+        /* Check if we have a buffered packet to scan for RPU */
 +        if (s->buffered_pkt.data && s->buffered_pkt.size > 0) {
 +            const uint8_t *pkt_data = s->buffered_pkt.data;
 +            int pkt_size = s->buffered_pkt.size;
@@ -71,10 +93,7 @@ index 0822482..8aa9a98 100644
 +            int found_rpu = 0;
 +            uint8_t *rpu_data = NULL;
 +            int rpu_size = 0;
-+
-+            /* Scan for NAL units in Annex B format */
 +            while (consumed < pkt_size - 4) {
-+                /* Find start code */
 +                if (pkt_data[consumed] == 0 && pkt_data[consumed+1] == 0) {
 +                    int nal_start = -1;
 +                    if (pkt_data[consumed+2] == 1) {
@@ -83,27 +102,21 @@ index 0822482..8aa9a98 100644
 +                        nal_start = consumed + 4;
 +                    }
 +                    if (nal_start > 0 && nal_start < pkt_size) {
-+                        /* HEVC NAL header: 2 bytes */
 +                        int nal_unit_type = (pkt_data[nal_start] >> 1) & 0x3F;
 +                        int nuh_layer_id = ((pkt_data[nal_start] & 0x01) << 5) | ((pkt_data[nal_start+1] >> 3) & 0x1F);
 +                        int temporal_id = pkt_data[nal_start+1] & 0x07;
-+
-+                        if (nal_unit_type == 62 /* HEVC_NAL_UNSPEC62 */ &&
-+                            nuh_layer_id == 0 && temporal_id == 0) {
-+                            /* Found RPU NAL */
++                        if (nal_unit_type == 62 && nuh_layer_id == 0 && temporal_id == 0) {
 +                            rpu_data = (uint8_t *)pkt_data + nal_start + 2;
 +                            rpu_size = pkt_size - nal_start - 2;
 +                            found_rpu = 1;
 +                            break;
 +                        }
-+                        /* Skip to next NAL */
 +                        consumed = nal_start + 2;
 +                        while (consumed < pkt_size - 4) {
 +                            if (pkt_data[consumed] == 0 && pkt_data[consumed+1] == 0 &&
 +                                (pkt_data[consumed+2] == 1 ||
-+                                 (pkt_data[consumed+2] == 0 && pkt_data[consumed+3] == 1))) {
++                                 (pkt_data[consumed+2] == 0 && pkt_data[consumed+3] == 1)))
 +                                break;
-+                            }
 +                            consumed++;
 +                        }
 +                        continue;
@@ -111,13 +124,10 @@ index 0822482..8aa9a98 100644
 +                }
 +                consumed++;
 +            }
-+
 +            if (found_rpu && rpu_data && rpu_size > 2) {
-+                /* Skip trailing start code prefix bytes if any */
 +                int skip = 0;
 +                if (rpu_data[0] == 0 && rpu_data[1] == 0 && rpu_data[2] == 1) skip = 3;
 +                else if (rpu_data[0] == 0 && rpu_data[1] == 0 && rpu_data[2] == 0 && rpu_data[3] == 1) skip = 4;
-+
 +                av_buffer_unref(&s->rpu_buf);
 +                s->rpu_buf = av_buffer_alloc(rpu_size - skip);
 +                if (s->rpu_buf) {
@@ -132,52 +142,38 @@ index 0822482..8aa9a98 100644
 +            }
 +        }
 +    }
-     /* In delay_flush mode, wait until the user has released or rendered
         all retained frames. */
      if (s->delay_flush && ff_mediacodec_dec_is_flushing(avctx, s->ctx)) {
-@@ -544,6 +644,10 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
-                 s->buffered_pkt.size -= ret;
-                 s->buffered_pkt.data += ret;
-                 if (s->buffered_pkt.size <= 0) {
+         if (!ff_mediacodec_dec_flush(avctx, s->ctx)) {
+@@ -649,6 +745,14 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+                         av_buffer_unref(&s->rpu_buf);
+                     }
+                     av_packet_unref(&s->buffered_pkt);
 +                    if (s->initialized_dovi) {
 +                        ff_dovi_ctx_flush(&s->dovi_ctx);
 +                        av_buffer_unref(&s->rpu_buf);
 +                    }
-                     av_packet_unref(&s->buffered_pkt);
++    if (s->initialized_dovi) {
++        ff_dovi_ctx_unref(&s->dovi_ctx);
++        av_buffer_unref(&s->rpu_buf);
++    }
                  } else {
                      av_log(avctx, AV_LOG_WARNING,
-@@ -569,9 +673,30 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
-             ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
-             if (ret < 0)
-                 return ret;
--            return ff_mediacodec_dec_receive(avctx, s->ctx, frame, true);
-+            ret = ff_mediacodec_dec_receive(avctx, s->ctx, frame, true);
-+            if (ret >= 0 && avctx->codec_id == AV_CODEC_ID_HEVC && s->initialized_dovi) {
-+                /* Attach DOVI RPU side data to output frame */
-+                if (s->rpu_buf) {
-+                    AVFrameSideData *sd = av_frame_new_side_data_from_buf(
-+                        frame, AV_FRAME_DATA_DOVI_RPU_BUFFER, s->rpu_buf);
-+                    if (sd) {
-+                        s->rpu_buf = NULL;  /* transfer ownership to frame */
-+                    }
-+                }
-+                ff_dovi_attach_side_data(&s->dovi_ctx, frame);
-+            }
-+            return ret;
-         } else if (ret == AVERROR(EAGAIN) && s->ctx->current_input_buffer < 0) {
--            return ff_mediacodec_dec_receive(avctx, s->ctx, frame, true);
-+            ret = ff_mediacodec_dec_receive(avctx, s->ctx, frame, true);
-+            if (ret >= 0 && avctx->codec_id == AV_CODEC_ID_HEVC && s->initialized_dovi) {
-+                if (s->rpu_buf) {
-+                    AVFrameSideData *sd = av_frame_new_side_data_from_buf(
-+                        frame, AV_FRAME_DATA_DOVI_RPU_BUFFER, s->rpu_buf);
-+                    if (sd) s->rpu_buf = NULL;
-+                }
-+                ff_dovi_attach_side_data(&s->dovi_ctx, frame);
-+            }
-+            return ret;
-         } else if (ret < 0) {
-             return ret;
-         }
+                            "could not send entire packet in single input buffer (%d < %d)\n",
+@@ -710,6 +814,14 @@ static void mediacodec_decode_flush(AVCodecContext *avctx)
+     MediaCodecContext *s = avctx->priv_data;
+ 
+     av_packet_unref(&s->buffered_pkt);
++    if (s->initialized_dovi) {
++        ff_dovi_ctx_flush(&s->dovi_ctx);
++        av_buffer_unref(&s->rpu_buf);
++    }
++    if (s->initialized_dovi) {
++        ff_dovi_ctx_unref(&s->dovi_ctx);
++        av_buffer_unref(&s->rpu_buf);
++    }
+ 
+     ff_mediacodec_dec_flush(avctx, s->ctx);
+ }
 -- 
 2.40.1
