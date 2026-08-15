@@ -12,9 +12,10 @@ else
 fi
 
 # Apply SynoManager DOVI RPU patch BEFORE entering build dir (paths are relative to ffmpeg source root)
-if [ -f ../../patches/0001-mediacodec-dovi-rpu-side-data.patch ] && ! grep -q "Dolby Vision RPU capture (for HEVC only)" libavcodec/mediacodecdec.c 2>/dev/null; then
+# cwd = buildscripts/deps/ffmpeg/ → ../../../patches/ = repo_root/patches/
+if [ -f ../../../patches/0001-mediacodec-dovi-rpu-side-data.patch ] && ! grep -q "Dolby Vision RPU capture (for HEVC only)" libavcodec/mediacodecdec.c 2>/dev/null; then
 	echo "Applying DOVI RPU mediacodec patch"
-	patch -p1 -s < ../../patches/0001-mediacodec-dovi-rpu-side-data.patch || {
+	patch -p1 -s < ../../../patches/0001-mediacodec-dovi-rpu-side-data.patch || {
 		echo "WARNING: DOVI RPU patch failed to apply cleanly, continuing without it"
 	}
 fi
