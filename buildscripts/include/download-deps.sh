@@ -20,8 +20,12 @@ fi
 # ffmpeg
 if [ ! -d ffmpeg ]; then
 	args=()
-	[ $IN_CI -eq 1 ] && args+=(--depth=1 -b "$v_ci_ffmpeg")
+	[ $IN_CI -eq 1 ] && args+=(--depth=1)
 	git clone https://github.com/FFmpeg/FFmpeg ffmpeg "${args[@]}"
+	# If v_ci_ffmpeg is a SHA (40 hex chars), checkout it; otherwise -b branch was used
+	if [[ "$v_ci_ffmpeg" =~ ^[0-9a-f]{40}$ ]]; then
+		cd ffmpeg && git fetch --depth=1 origin "$v_ci_ffmpeg" && git checkout "$v_ci_ffmpeg" && cd ..
+	fi
 fi
 
 # freetype2

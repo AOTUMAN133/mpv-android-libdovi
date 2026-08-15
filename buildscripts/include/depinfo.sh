@@ -44,8 +44,9 @@ dep_mpv_android=(mpv)
 
 ## for CI workflow
 
-# pinned ffmpeg revision
-v_ci_ffmpeg=master
+# pinned ffmpeg revision: 2026-07-20 commit with AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH (mediacodec)
+# 锁在补丁提交点而非 master：master 的 hevc_mp4toannexb 对无参数集 Emby 流更严格，导致 P5 软解 RPU 重塑失效
+v_ci_ffmpeg=c23123630e6a7e645c199599b8ade3fe7e9ab3db
 
 # filename used to uniquely identify a build prefix
 ci_tarball="prefix-ndk-${v_ndk}-lua-${v_lua}-unibreak-${v_unibreak}-harfbuzz-${v_harfbuzz}-fribidi-${v_fribidi}-freetype-${v_freetype}-libxml2-${v_libxml2}-fontconfig-${v_fontconfig}-mbedtls-${v_mbedtls}-ffmpeg-${v_ci_ffmpeg}-arm64.tgz"
