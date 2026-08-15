@@ -22,6 +22,10 @@ cpu=armv7-a
 cpuflags=
 [[ "$ndk_triple" == "arm"* ]] && cpuflags="$cpuflags -mfpu=neon -mcpu=cortex-a8"
 
+# Ensure we're on the right version for libdovi support
+git fetch --tags origin 2>/dev/null || true
+git checkout n8.1.1 2>/dev/null || echo 'ffmpeg already on n8.1.1'
+
 args=(
 	--target-os=android --enable-cross-compile
 	--cross-prefix=$ndk_triple- --cc=$CC --pkg-config=pkg-config --nm=llvm-nm
