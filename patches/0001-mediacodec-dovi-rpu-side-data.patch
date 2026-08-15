@@ -4,8 +4,8 @@ Date: Sat, 15 Aug 2026 16:00:00 +0800
 Subject: [PATCH] mediacodec: attach DOVI RPU side data to output frames
 
 ---
---- /tmp/clean_orig.c	2026-08-15 18:09:31.161977266 +0000
-+++ /tmp/clean_modified.c	2026-08-15 18:09:31.161977266 +0000
+--- a/libavcodec/mediacodecdec.c	2026-08-15 18:09:31.161977266 +0000
++++ b/libavcodec/mediacodecdec.c	2026-08-15 18:09:31.161977266 +0000
 @@ -44,6 +44,11 @@
  #include "jni.h"
  #include "mediacodec_wrapper.h"
