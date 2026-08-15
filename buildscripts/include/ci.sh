@@ -94,4 +94,12 @@ msg "Building mpv"
 msg "Building mpv-android"
 ./buildall.sh -n
 
+# Workaround: copy arm64-v8a APK to the upload path (workflow only uploads armeabi-v7a)
+ARM64_APK="app/build/outputs/apk/default/debug/app-default-arm64-v8a-debug.apk"
+ARM32_APK="app/build/outputs/apk/default/debug/app-default-armeabi-v7a-debug.apk"
+if [ -f "$ARM64_APK" ]; then
+	msg "Copying arm64-v8a APK to upload path"
+	cp "$ARM64_APK" "$ARM32_APK"
+fi
+
 exit 0
